@@ -18,6 +18,10 @@ on:
         description: 'TWRP Manifest Branch'
         required: true
         default: 'twrp-12.1'
+        type: choice
+        options:
+        - twrp-12.1
+        - twrp-16.0
       DEVICE_TREE:
         description: 'TWRP Device Tree'
         required: true
@@ -46,16 +50,8 @@ on:
         options:
         - elish
         - liuqin
-      MAKEFILE_NAME:
-        description: 'Specify your Device Makefile Name'
-        required: true
-        default: 'twrp_elish'
-        type: choice
-        options:
-        - twrp_elish
-        - twrp_mondrian
       BUILD_TARGET:
-        description: 'Specify your Build Target'
+        description: 'Specify your Build Target partition'
         required: true
         default: 'boot'
         type: choice
@@ -72,36 +68,46 @@ on:
 jobs:
   build:
     name: Build TWRP by ${{ github.actor }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     permissions:
       contents: write
     steps:
-    - name: Checkout
-      uses: actions/checkout@v5
-
     - name: Clean-up
       uses: rokibhasansagar/slimhub_actions@main
 
-    - name: Swap Space
-      uses: pierotofy/set-swap-space@master
-      with:
-        swap-size-gb: 12
-
     - name: Build Environment
       run: |
-        sudo apt install aria2 -y
-        git clone https://github.com/akhilnarang/scripts.git -b master
+        sudo apt install aria2 linux-modules-extra-$(uname -r) zram-tools -y
+        git clone https://gitlab.com/OrangeFox/misc/scripts.git -b master
         cd scripts
         sudo bash setup/android_build_env.sh
+        cd .. && rm -rf scripts
+        # Redendent apt cleanup
+        sudo apt autoclean >/dev/null || true
+        sudo apt autoremove -qy 2>/dev/null || true
+        sudo rm -rf /var/cache/apt/archives/ 2>/dev/null || true
+
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: '3072'
 
     - name: Setup ccache
       uses: hendrikmuhs/ccache-action@v1.2
       if: inputs.USE_CCACHE
       with:
-        max-size: "10G"
-        key: ${{ runner.os }}-${{ inputs.MANIFEST_BRANCH }}
+        max-size: "2G"
+        create-symlink: true
+
+    - name: Setup zram
+      run: |
+        sudo modprobe zram
+        sudo sed -i 's/^#PERCENT=50/PERCENT=90/' /etc/default/zramswap
+        sudo sed -i 's/^#PRIORITY=100/PRIORITY=1000/' /etc/default/zramswap
+        sudo systemctl restart zramswap
+        zramctl
 
     - name: Set-up Manifest
       run: |
@@ -132,7 +138,22 @@ jobs:
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         set -e
-        lunch ${{ inputs.MAKEFILE_NAME }}-eng && make clean && mka adbd ${{ inputs.BUILD_TARGET }}image -j$(nproc --all)
+        case "${{ inputs.MANIFEST_BRANCH }}" in
+            "twrp-12.1")
+                LUNCH_SUFFIX="-eng"
+                ;;
+            "twrp-14.1")
+                LUNCH_SUFFIX="-ap2a-eng"
+                ;;
+            "twrp-16.0")
+                LUNCH_SUFFIX="-bp2a-eng"
+                ;;
+            *)
+                LUNCH_SUFFIX=""
+                echo "警告：未匹配到 MANIFEST_BRANCH=${{ inputs.MANIFEST_BRANCH }}"
+                ;;
+        esac
+        lunch twrp_${{ inputs.DEVICE_NAME }}${LUNCH_SUFFIX} && make clean && mka adbd ${{ inputs.BUILD_TARGET }}image
 
     - name: Set Release Properties
       run: |
@@ -153,7 +174,7 @@ jobs:
         files: |
           twrp/out/target/product/${{ inputs.DEVICE_NAME }}/${{ env.BUILD_TARGET_NAME }}.img
           twrp/out/target/product/${{ inputs.DEVICE_NAME }}/*.zip
-        name: Unofficial TWRP for ${{ inputs.MAKEFILE_NAME }} // ${{ env.BUILD_DATE }}
+        name: Unofficial TWRP for ${{ inputs.DEVICE_NAME }} // ${{ env.BUILD_DATE }}
         tag_name: ${{ github.run_id }}
         body: |
           ## TWRP Build - Unofficial
